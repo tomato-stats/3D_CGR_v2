@@ -1,0 +1,93 @@
+---
+title: "Untitled"
+output: bookdown::html_document2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r source}
+
+source("./data/sequences.R")
+source("../R/functions.R")
+
+```
+
+```{r libraries}
+
+library(reshape2)
+library(msa)
+library(seqinr)
+library(plotly)
+library(stringr)
+library(magrittr)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(moments)
+
+```
+
+
+# R Markdown
+
+
+```{r}
+
+# Convert sequences to 3D chaos-game representation
+# Drop irrelevant first coordinate, (0, 0, 0)
+
+beta_cg <- lapply(beta_seq, function(x) seq_to_hypercomplex_cg4(x)[-1,])  
+nadh_cg <- lapply(nadh, function(x) seq_to_hypercomplex_cg4(x)[-1,])  
+sim_cg <- lapply(sim_fas, function(x) seq_to_hypercomplex_cg4(x)[-1,])  
+
+```
+
+
+```{r}
+
+# Calculate distances from landmarks (A, C, G, T, origin)
+# A = c(0, (c(0, 0, 0) - (1/2)) * 2*sqrt(1/3))
+# T = c(0, (c(1, 1, 0) - (1/2)) * 2*sqrt(1/3))
+# C = c(0, (c(1, 0, 1) - (1/2)) * 2*sqrt(1/3))
+# G = c(0, (c(0, 1, 1) - (1/2)) * 2*sqrt(1/3))
+# Calculate the first 4 statistical moments for the distances
+
+cg_descriptors <- function(cg_coords){
+  A <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(0, 0, 0) - (1/2)) * 2*sqrt(1/3)) )
+  T <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(1, 1, 0) - (1/2)) * 2*sqrt(1/3)) )
+  C <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(1, 0, 1) - (1/2)) * 2*sqrt(1/3)) )
+  G <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(0, 1, 1) - (1/2)) * 2*sqrt(1/3)) )
+  o <- apply(cg_coords, 1, pt_dist, p2 = c(0, 0, 0, 0) )
+  
+  return(c(mean(A), var(A), skewness(A), #kurtosis(A),
+           mean(T), var(T), skewness(T), #kurtosis(T),
+           mean(C), var(C), skewness(C), #kurtosis(C),
+           mean(G), var(G), skewness(G), #kurtosis(G),
+           mean(o), var(o), skewness(o)#, kurtosis(o)
+           ))
+}
+
+beta_desc <- t(sapply(beta_cg,  cg_descriptors)) 
+beta_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(beta_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+nadh_desc <- t(sapply(nadh_cg,  cg_descriptors)) 
+nadh_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(nadh_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+sim_desc <- t(sapply(sim_cg,  cg_descriptors)) 
+sim_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(beta_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+```
