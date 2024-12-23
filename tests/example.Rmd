@@ -1,0 +1,416 @@
+---
+title: "Untitled"
+output: bookdown::html_document2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r source}
+
+library(Rcpp)
+sourceCpp("../R/chaosgame.cpp")
+sourceCpp("../R/features.cpp")
+source("./data/sequences.R")
+source("../R/functions.R")
+
+```
+
+```{r libraries}
+
+library(reshape2)
+library(msa)
+library(seqinr)
+library(plotly)
+library(stringr)
+library(magrittr)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(movMF)
+
+```
+
+# R Markdown
+
+
+```{r}
+
+meta <- read_csv("./data/covid19metadata.csv")
+cov_seq <- read.FASTA("./data/covid19.fas") |> as.character() 
+
+# Convert sequences to 3D chaos-game representation
+
+beta_cg <- lapply(beta_seq, seq_to_cgr)  
+nadh_cg <- lapply(nadh, seq_to_cgr)  
+syn_cg <- lapply(syn_fas, seq_to_cgr) 
+cov_cg <- lapply(cov_seq, seq_to_cgr)
+
+```
+```{r}
+
+# In order to fix a mixture of von Mises distributions, the angles must be
+# converted to points on the unit circle 
+
+angle_to_unitcirclepoints <- function(angle, mode = "radians"){
+  if(mode == "degrees"){
+    angle  <- angle * pi / 180
+  }
+  x <- cos(angle)
+  y <- sin(angle)
+  return(cbind(x, y))
+}
+
+get_angle_mixture <- function(angle_input, num_clusters = 30){
+  pts_on_unit_circle <- angle_to_unitcirclepoints(angle_input)
+  d <- movMF(pts_on_unit_circle, num_clusters, maxiter = 1000, nruns = 2, minalpha = 0)
+  return(d)
+}
+
+reference <- c(0, 1,0)
+angles <- orientedangle1(cov_cg[[1]][-1,], reference)
+pts_on_unit_circle <- angle_to_unitcirclepoints(angles)
+number_of_mixed_vM_fxns <- 30
+d <- movMF(pts_on_unit_circle, number_of_mixed_vM_fxns, maxiter = 1000, nruns = 2, minalpha = 0)
+mu <- atan2(d$theta[,2], d$theta[,1])
+kappa <- sqrt(rowSums(d$theta^2)) # also: kappa <- slam::row_norms(d$theta)
+
+domain <-  seq(-pi, pi, length = 10000)
+pdf <- dmovMF(angle_to_unitcirclepoints(domain), d$theta, d$alpha, log = F)
+normalizing_constant <- pracma::trapz(domain, pdf)
+
+data.frame(x = angles) |> 
+  ggplot(aes(x = x)) + 
+  geom_histogram(aes(y = after_stat(density)), bins = 100) +
+  geom_density() + 
+  geom_point(
+    data = data.frame(domain = domain, pdf  = pdf),
+    aes(x = domain, y = pdf / (2*pi)) 
+  )
+
+
+fits <- vector(mode = "list", length = length(cov_cg)) 
+for(v_index in seq_along(cov_cg)){
+  reference <- c(1, 0,0)
+  angles <- orientedangle1(cov_cg[[v_index]][-1,], reference)
+  fits[[v_index]] <- get_angle_mixture(angles)
+}
+
+distance_matrix <- matrix(0, nrow = length(cov_cg), ncol = length(cov_cg))
+domain <-  seq(-pi, pi, length = 10000)
+for(i in seq_along(cov_cg)){
+  for(j in (i+1):length(cov_cg)){
+    d1 <- fits[[i]]
+    d2 <- fits[[j]]
+    pdf_i <- dmovMF(angle_to_unitcirclepoints(domain), d1$theta, d1$alpha, log = F) / (2*pi)
+    pdf_j <- dmovMF(angle_to_unitcirclepoints(domain), d2$theta, d2$alpha, log = F) / (2*pi)
+    overlap <- pmin(pdf_i, pdf_j)
+    similarity <- pracma::trapz(overlap)
+    distance_matrix[i, j] <- 1-similarity
+  }
+}
+
+```
+
+```{r}
+
+reference_vectors <- list(c(1, 0, 0), c(0, 1, 0), c(0, 0, 1))
+beta_distance_matrices <- vector(mode = "list", length  = length(reference_vectors))
+
+for(rv in seq_along(reference_vectors)){
+  beta_fits <- vector(mode = "list", length = length(beta_cg)) 
+  reference <- reference_vectors[[rv]]
+  
+  for(v_index in seq_along(beta_cg)){
+    angles <- orientedangle1(beta_cg[[v_index]][-1,], reference)
+    beta_fits[[v_index]] <- get_angle_mixture(angles, num_clusters = 10)
+  }
+  
+  beta_distance_matrix <- matrix(0, nrow = length(beta_cg), ncol = length(beta_cg))
+  domain <-  seq(-pi, pi, length = 10000)
+  for(i in seq_along(beta_cg)[-length(beta_cg)]){
+    for(j in (i+1):length(beta_cg)){
+      d1 <- beta_fits[[i]]
+      d2 <- beta_fits[[j]]
+      pdf_i <- dmovMF(angle_to_unitcirclepoints(domain), d1$theta, d1$alpha, log = F) / (2*pi)
+      pdf_j <- dmovMF(angle_to_unitcirclepoints(domain), d2$theta, d2$alpha, log = F) / (2*pi)
+      overlap <- pmin(pdf_i, pdf_j)
+      similarity <- pracma::trapz(x = domain, y = overlap)
+      beta_distance_matrix[i, j] <- 1-similarity
+    }
+  }
+  beta_distance_matrix <- t(beta_distance_matrix) + beta_distance_matrix
+  rownames(beta_distance_matrix) <- names(beta_cg)
+  colnames(beta_distance_matrix) <- names(beta_cg)
+  beta_distance_matrices[[rv]] <- beta_distance_matrix
+}
+ape::fastme.bal(Reduce(`+`, beta_distance_matrices) / 3) |> root("gallus") |> plot.phylo() 
+ape::fastme.ols(Reduce(`+`, beta_distance_matrices) / 3) |> root("gallus") |> plot.phylo() 
+
+```
+
+```{r}
+
+reference_vectors <- list(c(1, 0, 0), c(0, 1, 0), c(0, 0, 1))
+beta_distance_matrices2 <- vector(mode = "list", length  = length(reference_vectors))
+
+for(rv in seq_along(reference_vectors)){
+  beta_fits <- vector(mode = "list", length = length(beta_cg)) 
+  negative_pi_counts <- vector(mode = "list", length = length(beta_cg)) 
+  positive_pi_counts <- vector(mode = "list", length = length(beta_cg)) 
+  reference <- reference_vectors[[rv]]
+  
+  for(v_index in seq_along(beta_cg)){
+    angles <- by3roworientedangle4(beta_cg[[v_index]][-1,], reference)
+    negative_pi_counts[[v_index]] <- sum(angles < -2) / length(angles)
+    positive_pi_counts[[v_index]] <- sum(angles < 2) / length(angles)
+    beta_fits[[v_index]] <- get_angle_mixture(angles[angles < 2 & angles > -2] * 2, num_clusters = 8)
+  }
+  
+  beta_distance_matrix2 <- matrix(0, nrow = length(beta_cg), ncol = length(beta_cg))
+  domain <-  seq(-pi, pi, length = 10000)
+  for(i in seq_along(beta_cg)[-length(beta_cg)]){
+    for(j in (i+1):length(beta_cg)){
+      d1 <- beta_fits[[i]]
+      d2 <- beta_fits[[j]]
+      pdf_i <- (dmovMF(angle_to_unitcirclepoints(domain), d1$theta, d1$alpha, log = F) / (2*pi) ) * (1 - (negative_pi_counts[[i]] + positive_pi_counts[[i]]) )
+      pdf_j <- (dmovMF(angle_to_unitcirclepoints(domain), d2$theta, d2$alpha, log = F) / (2*pi) ) * (1 - (negative_pi_counts[[j]] + positive_pi_counts[[j]]) )
+      overlap <- pmin(pdf_i, pdf_j) 
+      similarity <- pracma::trapz(x = domain, y = overlap) + pmin(negative_pi_counts[[i]], negative_pi_counts[[j]]) + pmin(positive_pi_counts[[i]], positive_pi_counts[[j]])
+      beta_distance_matrix2[i, j] <- 1-similarity
+    }
+  }
+  beta_distance_matrix2 <- t(beta_distance_matrix2) + beta_distance_matrix2
+  rownames(beta_distance_matrix2) <- names(beta_cg)
+  colnames(beta_distance_matrix2) <- names(beta_cg)
+  beta_distance_matrices2[[rv]] <- beta_distance_matrix2
+}
+
+ape::fastme.bal(Reduce(`+`, beta_distance_matrices2) / 3) |> root("gallus") |> plot.phylo() 
+ape::fastme.ols(Reduce(`+`, beta_distance_matrices2) / 3) |> root("gallus") |> plot.phylo() 
+
+((Reduce(`+`, beta_distance_matrices) / 3) + (Reduce(`+`, beta_distance_matrices2) / 3) ) / 2
+
+```
+
+
+```{r}
+
+temp <- function(seq_cg, frac = 1/15){
+  bins <- ceiling(frac * (mean(sapply(seq_cg, nrow)) - 1))
+    
+  feature_function <- by3roworientedangle4
+  reference_coordinate <- c(1, 0, 0)
+  features <- feature_function(seq_cg)
+  feature_histograms
+  
+}
+
+cgr_distance2 <- 
+  function(seq_cg, frac = 1/15, cs = T, power = 1, normalize = F){
+    
+    combine_distances <- function(dist_list, p){
+      # Power mean: arithmetic p = 1, geometric p = 0, harmonic p = -1, quadratic p = 2
+      # As p -> infinity, power mean -> max; 
+      # as p -> -infinity, power mean -> min. 
+      n <- length(dist_list)
+      Reduce(`+`, lapply(dist_list, function(x){(1/n) * x^p}))^(1/p)
+    }
+    
+    center_scale <- function(hist_mat){
+      apply(hist_mat, 1, function(x) {(x- mean(x)) / sd(x)}) |> t()
+    }
+    
+    cen_scal <- identity
+    norm <- identity
+    if(cs) cen_scal <- center_scale
+    if(normalize) norm <- function(x){x / max(x)}
+    
+    bins <- ceiling(frac * (mean(sapply(seq_cg, nrow)) - 1))
+    
+    reference_coordinates <- list(c(1, 0, 0), c(0, 1, 0), c(0, 0, 1))
+    feature_functions <- list(function(x, ...) orientedangle1(x[-1,], ...),
+                              by3roworientedangle4,
+                              orienteddistance1,
+                              by3roworienteddistance4)
+    shape_histograms <- vector(mode = "list", length = 12)
+    i <- 1
+    for(f in seq_along(feature_functions)){
+      for(v in seq_along(reference_coordinates)){
+        shape_histograms[[i]] <- lapply(seq_cg, feature_functions[[f]], v = reference_coordinates[[v]])
+        shape_histograms[[i]] <- feature_histograms(shape_histograms[[i]] , bin_count = bins)
+        shape_histograms[[i]] <- shape_histograms[[i]]  |> cen_scal() |> dist() |> as.matrix() |> norm()
+        i <- i + 1
+      }
+    }
+    
+    coord_features <- 
+      coordinate_histograms(seq_cg,  bin_count = bins) |> 
+      split_coord_histograms(ncol(seq_cg[[1]])) 
+    coord_features <- 
+      lapply(coord_features, function(x) x |> cen_scal() |> dist() |> as.matrix() |> norm())
+    combine_distances(
+      c(shape_histograms, coord_features), 
+      p = power
+    )
+  }
+
+```
+
+
+
+```{r recognition}
+
+# Calculate distances from landmarks (A, C, G, T, origin)
+# A = c(0, (c(0, 0, 0) - (1/2)) * 2*sqrt(1/3))
+# T = c(0, (c(1, 1, 0) - (1/2)) * 2*sqrt(1/3))
+# C = c(0, (c(1, 0, 1) - (1/2)) * 2*sqrt(1/3))
+# G = c(0, (c(0, 1, 1) - (1/2)) * 2*sqrt(1/3))
+# Calculate the first 4 statistical moments for the distances
+
+cg_descriptors <- function(cg_coords){
+  A <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(0, 0, 0) - (1/2)) * 2*sqrt(1/3)) )
+  T <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(1, 1, 0) - (1/2)) * 2*sqrt(1/3)) )
+  C <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(1, 0, 1) - (1/2)) * 2*sqrt(1/3)) )
+  G <- apply(cg_coords, 1, pt_dist, p2 = c(0, (c(0, 1, 1) - (1/2)) * 2*sqrt(1/3)) )
+  o <- apply(cg_coords, 1, pt_dist, p2 = c(0, 0, 0, 0) )
+  
+  return(c(mean(A), var(A), skewness(A), #kurtosis(A),
+           mean(T), var(T), skewness(T), #kurtosis(T),
+           mean(C), var(C), skewness(C), #kurtosis(C),
+           mean(G), var(G), skewness(G), #kurtosis(G),
+           mean(o), var(o), skewness(o)#, kurtosis(o)
+           ))
+}
+
+beta_desc <- t(sapply(beta_cg,  cg_descriptors)) 
+beta_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(beta_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+nadh_desc <- t(sapply(nadh_cg,  cg_descriptors)) 
+nadh_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(nadh_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+sim_desc <- t(sapply(sim_cg,  cg_descriptors)) 
+sim_desc |> as.data.frame() |>
+  preProcess(method = c("center", "scale")) |>
+  predict(beta_desc |> as.data.frame() ) |> 
+  dist() |>  hclust(method = "complete") |> 
+  plot()
+
+```
+
+```{r entropy}
+
+hist_nd <- function(df, breaks){
+  col_indices <- 1:ncol(df)
+  binned_df <- sapply(col_indices, function(x) (cut(df[,x], breaks[[x]], include.lowest = T)))
+  colnames(binned_df) <- colnames(df)
+  binned_df <- as.data.frame(binned_df)
+  for(i in col_indices){
+    binned_df[,i] <- factor(binned_df[,i], levels = levels(cut(df[,i], breaks[[i]], include.lowest = T)))
+  } 
+  return(table(binned_df) |> as.vector())
+}
+
+
+
+# The pattern with a lot of information is unlikely to occur 
+# Informative = unlikely 
+
+calc_prob <- function(vec){
+  fitted <- fitdist(as.vector(vec), "nbinom")
+  mu <- fitdist(as.vector(vec), "nbinom") |> (\(x) x$estimate[["mu"]])()
+  size <- fitdist(as.vector(vec), "nbinom") |> (\(x) x$estimate[["size"]])()
+  
+  ifelse(vec > mu, 1-pnbinom(vec, size = size, mu = mu), pnbinom(vec, size = size, mu = mu) )
+}
+
+surprising_info <- function(prob){
+  log(1/prob, base = 2)
+}
+
+entropy <- function(probabilities){ # Expected value of surprise / information
+  sum(surprising_info(probabilities) * probabilities )
+}
+
+coordinate_entropy <- function(cgr_coords, bin_count){
+  cgr_coords <- lapply(cgr_coords, 
+                       function(x) preProcess(x, method = "zv") |>  predict(x))
+  
+  # Get histogram bounds
+  hist_lb <- apply(do.call(rbind, cgr_coords), 2, min)
+  hist_ub <- apply(do.call(rbind, cgr_coords), 2, max)
+  
+  # Get histogram intervals for each axis
+  hist_breaks <- list()
+  for(i in seq_along(hist_lb)){
+    insert_me <- unique(seq(hist_lb[i], hist_ub[i], length.out = bin_count + 1))
+    if(length(insert_me) < 2) insert_me <- c(insert_me, insert_me + 1) 
+    hist_breaks[[i]] <- insert_me
+  }
+  # Get histogram bin counts
+  tabulations <- lapply(cgr_coords, 
+                        function(x) hist_df_unpaired(x, breaks = hist_breaks))
+  tabulations <- sapply(tabulations, unlist)
+  colnames(tabulations) <- names(cgr_coords)
+  apply(tabulations, 1, function(x) entropy(sum(x)/length(x)))
+  apply(tabulations, 1, function(x) entropy(table(x)[as.character(x)] / length(x)) )
+  
+  tabulations <- 
+    apply(tabulations, 1, function(x) 
+    (table(x)[as.character(x)] / length(x) * entropy(table(x)[as.character(x)] / length(x) )) ) |> t()
+  colnames(tabulations) <- names(cgr_coords)
+  
+  return(t(tabulations))
+}
+
+
+  tabulations <- sapply(seq_along(dna_list), function(x) hist_nd(x.FUNC[[x]], breaks = hist_breaks))
+
+  colnames(tabulations) <- names(dna_list)
+  rownames(tabulations) <- 1:nrow(tabulations)
+  
+  tabulations <- tabulations[-which(rowSums(tabulations) == 0),]
+  tabulations <- preProcess(t(tabulations), method = c("zv", preproc)) |> predict(t(tabulations)) |> t()
+  rownames(tabulations) <- paste0("V", 1:nrow(tabulations))
+
+
+
+coordinate_entropy(beta_cg, bin_count = 1000) |>
+  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+coordinate_entropy(nadh_cg, bin_count = 1000) |>
+  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+coordinate_entropy(sim_cg, bin_count = 1000) |>
+  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+
+
+
+coordinate_signature(beta_cg, bin_count = 6110) |>  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+
+coordinate_signature(nadh_cg, bin_count = 6110) |>  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+
+coordinate_signature(sim_cg, bin_count = 6110) |>  dist() |> hclust(method = "complete") |>
+  plot(axes = F, xlab = NULL, ylab = NULL, main = NULL, sub = NULL, ann = F)
+
+
+
+
+```

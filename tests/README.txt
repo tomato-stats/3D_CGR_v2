@@ -1,0 +1,1 @@
+Data and scripts in this directory test DNA distances based on 3D CGR.

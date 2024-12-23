@@ -1,0 +1,173 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-12-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+
+# Load the required libraries
+library(rentrez)
+library(xml2)
+library(stringr)
+library(tidyverse)
+library(glue)
+
+```
+
+##
+
+```{r taxon}
+# Specify the taxon number
+taxon_number <- "30602"
+
+# Search the taxonomy database for the taxon number
+search_results <- entrez_search(db = "taxonomy", term = paste0(taxon_number, "[uid]"))
+
+# Check if results are found
+if (length(search_results$ids) > 0) {
+  # Retrieve summary information about the taxon
+  taxon_summary <- entrez_summary(db = "taxonomy", id = search_results$ids[[1]])
+  
+  # Print the organism name associated with the taxon
+  organism_name <- taxon_summary$scientificname
+  print(paste("Organism associated with taxon", taxon_number, ":", organism_name))
+  
+  # Retrieve full details (optional)
+  taxon_details <- entrez_fetch(db = "taxonomy", id = search_results$ids[[1]], rettype = "xml")
+  print(taxon_details)
+} else {
+  print(paste("No results found for taxon:", taxon_number))
+}
+```
+
+```{r}
+
+
+get_child_nodes <- function(string){
+  # Find all GBFeature nodes
+  term <- glue("//GBFeature[GBFeature_key[text()='{string}']]")
+  features <- xml_find_all(parsed_xml, term) |> xml_children()
+  
+  # Initialize an empty list to store rows
+  rows <- list()
+  
+  # Loop through each feature and extract key and qualifiers
+  for (feature in features) {
+    
+    # Find all GBQualifier nodes
+    qualifiers <- xml_find_all(feature, "./GBQualifier")
+    
+    # Extract name and value pairs from qualifiers
+    for (qualifier in qualifiers) {
+      name <- xml_text(xml_find_first(qualifier, "./GBQualifier_name"))
+      value <- xml_text(xml_find_first(qualifier, "./GBQualifier_value"))
+      
+      # Store in a list
+      rows <- append(rows, list(c(name = name, value = value)))
+    }
+  }
+  output <- do.call(bind_rows, rows)
+  output["feature"] <- string
+  return(output)
+}
+
+
+
+```
+
+## Get data
+
+```{r}
+
+# Function to extract metadata for FASTA files
+extract_data <- function(xml_rec){
+  # Parse the XML and extract the meta information
+  parsed_xml <- xml2::read_xml(xml_rec)
+  extract_wrapper <- function(text){
+    xml2::xml_find_all(
+      parsed_xml,
+      text
+    ) |>  xml2::xml_text()
+  }
+  meta <- rbind(get_child_nodes("source"), get_child_nodes("CDS"))
+  sequence <- extract_wrapper("//GBSeq_sequence")
+  features <- data.frame(
+    locations = extract_wrapper("//GBFeature_location"),
+    key = extract_wrapper("//GBFeature_key")
+  )
+  return(list(meta = meta, sequence = sequence, features = features))
+}
+
+
+# Function to search data and extract meta data
+search_and_summarise <- function(db, search_term, ...){
+  search_results <- entrez_search(db = db, term=search_term, ...)
+  ids <- search_results$ids
+  if(length(ids) == 0) return(matrix(nrow = 0, ncol = 6 ))
+  else{
+    # Fetch the XML records
+    xml_records <- 
+      entrez_fetch(
+        db=db, id=ids, rettype="xml"
+      )
+    
+    # Extract meta data
+    meta <- extract_meta(xml_records)
+    countries <- gsub(":.*","", meta[,"country"])
+    meta <- cbind(ids, meta, country_general = countries)
+    return(meta)
+  }
+}
+
+```
+
+```{r}
+
+# Function that takes IDs and appends a fasta file and a meta data file
+
+write_fasta <- function(ids, fasta_file){
+  fasta_data <- entrez_fetch(db=db, id=ids, rettype="fasta", retmode="text")
+  # Renaming the fasta data sequences for easier matching with meta data later
+  for(id in ids){
+    fasta_data <-  sub(">(.*?)\n", paste0("#",id,'\n'), fasta_data) 
+  }
+  fasta_data <- gsub("#", ">", fasta_data)
+  vroom::vroom_write_lines(
+    fasta_data, file=paste0(fasta_file, ".fasta"), append = T
+  )
+}
+
+write_wrapper <- function(ids, fasta_file, meta_data){
+  # Function to Write/append fasta file and meta file
+
+  write_this <- meta_data[which(meta_data[,"ids" ] %in% ids),,drop = F]
+  if(!all(write_this[,"ids"] == ids)){
+    print("meta data order must be the same as ids")
+    return(NULL)
+  }
+  write_fasta(ids, fasta_file)
+  file_exists <- length(list.files(pattern = paste0(fasta_file, ".txt"))) > 0
+  vroom::vroom_write(
+    write_this |> as.data.frame(), 
+    file=paste0(fasta_file, ".txt"), 
+    col_names = !file_exists, append = T 
+  )
+}
+
+```
+
+```{r}
+
+# Search parameters
+db <- "nuccore"
+ss <- 65 # Seach NCBI for 65 entries at a time
+
+search_term <- '
+db_xref[All Fields]
+'
+
+```
