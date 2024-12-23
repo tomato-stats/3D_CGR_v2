@@ -6,7 +6,6 @@
 library(stringr)
 library(zoo)
 library(hypervolume)
-library(Rcpp)
 library(parallel)
 
 #=====================================================================
@@ -75,8 +74,6 @@ coord2 <- CGR_table(
   c(2*sqrt(2) / 3, 0, -1/3)
 )
 
-sourceCpp("./R/chaosgame.cpp") 
-
 # (recursive implementation)
 seq_to_cgr <- 
   function(dna_seq, CGR_coord = coord1, df = F, axes = c("i", "j", "k")){ 
@@ -100,8 +97,6 @@ seq_to_cgr <-
 #=====================================================================
 # Functions for assist in building histograms
 #=====================================================================
-
-sourceCpp("./R/features.cpp")
 
 ## Functions for building histograms for multiple features.
 ## Paired histogram currently not used, but may be helpful for future 
